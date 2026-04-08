@@ -560,26 +560,64 @@ with tab2:
     )
     st.plotly_chart(fig_rev, use_container_width=True)
 
-    # Annualized yield
+    # Portfolio yield + weighted average monthly rate (dual axis)
     ann_yield = []
+    wtd_avg_rate = []
+    # Rate lookup: starting book uses its own rates, new loans use sidebar rates
+    starting_rates = {sc["tenor"]: sc["monthly_rate"] * 100 for sc in starting_cohorts}
+
     for i in range(len(summary_df)):
         bal = summary_df["outstanding_balance"].iloc[i]
         inc = summary_df["interest_income"].iloc[i]
+        # Annualized yield = (monthly interest / outstanding) * 12
         if bal > 0 and i > 0:
             ann_yield.append(inc / bal * 12 * 100)
         else:
             ann_yield.append(0)
 
+        # Weighted avg monthly rate from tenor balances
+        total_bal = 0.0
+        weighted_rate = 0.0
+        # Starting book balance
+        starting_bal = tenor_df["Starting Book"].iloc[i] if i < len(tenor_df) else 0
+        if starting_bal > 0:
+            # Use blended starting rate (weighted by original starting balances)
+            total_starting = sum(sc["balance"] for sc in starting_cohorts)
+            blended_starting = sum(sc["balance"] * sc["monthly_rate"] * 100
+                                   for sc in starting_cohorts) / total_starting if total_starting > 0 else 0
+            weighted_rate += starting_bal * blended_starting
+            total_bal += starting_bal
+        # New loan balances by tenor
+        for tenor in TENORS:
+            t_bal = tenor_df[f"{tenor}mo"].iloc[i] if i < len(tenor_df) else 0
+            if t_bal > 0:
+                weighted_rate += t_bal * tenor_rates[tenor]
+                total_bal += t_bal
+        if total_bal > 0:
+            wtd_avg_rate.append(weighted_rate / total_bal)
+        else:
+            wtd_avg_rate.append(0)
+
     fig_yield = go.Figure()
     fig_yield.add_trace(go.Scatter(
         x=date_labels[1:], y=ann_yield[1:],
-        mode="lines+markers", name="Annualized Yield",
+        mode="lines+markers", name="Annualized Portfolio Yield",
         line=dict(width=2, color="#f39c12"),
+        yaxis="y",
+    ))
+    fig_yield.add_trace(go.Scatter(
+        x=date_labels[1:], y=wtd_avg_rate[1:],
+        mode="lines+markers", name="Wtd Avg Monthly Rate",
+        line=dict(width=2, color="#2980b9", dash="dot"),
+        yaxis="y2",
     ))
     fig_yield.update_layout(
-        title="Annualized Portfolio Yield (%)",
-        yaxis_title="%", yaxis_tickformat=".1f",
-        height=350, hovermode="x unified",
+        title="Portfolio Yield & Weighted Average Monthly Rate",
+        yaxis=dict(title="Annualized Yield (%)", tickformat=".1f", side="left"),
+        yaxis2=dict(title="Wtd Avg Monthly Rate (%)", tickformat=".2f",
+                    overlaying="y", side="right"),
+        height=400, hovermode="x unified",
+        legend=dict(x=0.01, y=0.99),
     )
     st.plotly_chart(fig_yield, use_container_width=True)
 
