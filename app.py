@@ -490,28 +490,55 @@ with tab2:
     )
     st.plotly_chart(fig_disb, use_container_width=True)
 
-    # Loan count chart — include starting book counts at month 0
-    # Compute starting book loan counts from balance / avg ticket
+    # Cumulative loan count — starting book running off + new loans building up
+    # Starting book loan counts (decline as they mature)
     starting_loan_counts = {}
     for sc in starting_cohorts:
         t = sc["tenor"]
-        starting_loan_counts[t] = int(sc["balance"] / avg_ticket[t]) if avg_ticket[t] > 0 else 0
+        count = int(sc["balance"] / avg_ticket[t]) if avg_ticket[t] > 0 else 0
+        remaining = sc["remaining_life"]
+        # Linear runoff over remaining life
+        starting_loan_counts[t] = []
+        for m in range(horizon + 1):
+            if m >= remaining:
+                starting_loan_counts[t].append(0)
+            else:
+                starting_loan_counts[t].append(int(count * (remaining - m) / remaining))
 
-    all_months_loans = [date_labels[0]] + months_list
+    # New loans: cumulative active at each month (a loan disbursed in month i
+    # with tenor t is active from month i through month i+t-1)
+    new_active = {t: [0] * (horizon + 1) for t in TENORS}
+    for i in range(len(sales_df)):
+        month_idx = i + 1  # disbursements start month 1
+        for tenor in TENORS:
+            disb = sales_df.iloc[i][f"{tenor}mo ₦"]
+            count = int(disb / avg_ticket[tenor]) if avg_ticket[tenor] > 0 else 0
+            for m in range(month_idx, min(month_idx + tenor, horizon + 1)):
+                new_active[tenor][m] += count
+
     fig_loans = go.Figure()
+    # Starting book as one stacked group
+    total_starting_active = [0] * (horizon + 1)
+    for t in TENORS:
+        for m in range(horizon + 1):
+            total_starting_active[m] += starting_loan_counts[t][m]
+    fig_loans.add_trace(go.Scatter(
+        x=date_labels, y=total_starting_active,
+        mode="lines", name="Starting Book",
+        stackgroup="one", line=dict(width=0.5),
+        fillcolor="#7f8c8d",
+    ))
+    # New loans by tenor
     for tenor in TENORS:
-        starting_count = starting_loan_counts.get(tenor, 0)
-        new_counts = list(sales_df[f"{tenor}mo #"].values)
-        fig_loans.add_trace(go.Bar(
-            x=all_months_loans,
-            y=[starting_count] + new_counts,
-            name=f"{tenor}mo",
-            marker_color=colors_map.get(f"{tenor}mo", "#95a5a6"),
+        fig_loans.add_trace(go.Scatter(
+            x=date_labels, y=new_active[tenor],
+            mode="lines", name=f"New {tenor}mo",
+            stackgroup="one", line=dict(width=0.5),
+            fillcolor=colors_map.get(f"{tenor}mo", "#95a5a6"),
         ))
     fig_loans.update_layout(
-        title="Monthly Loan Count by Tenor (incl. Starting Book)",
-        barmode="stack",
-        yaxis_title="Loans",
+        title="Active Loan Count Over Time (Starting Book + New Issues)",
+        yaxis_title="Active Loans",
         height=400, hovermode="x unified",
     )
     st.plotly_chart(fig_loans, use_container_width=True)
@@ -556,14 +583,17 @@ with tab2:
     )
     st.plotly_chart(fig_yield, use_container_width=True)
 
-    # Sales summary table (transposed, all strings to avoid None)
-    sales_summary = pd.DataFrame(index=months_list)
-    for tenor in TENORS:
-        sales_summary[f"{tenor}mo Disbursement (₦)"] = sales_df[f"{tenor}mo ₦"].apply(lambda x: f"{x:,.0f}")
-        sales_summary[f"{tenor}mo Loans"] = sales_df[f"{tenor}mo #"].apply(lambda x: f"{x:,}")
-    sales_summary["Total Disbursement (₦)"] = sales_df["Total ₦"].apply(lambda x: f"{x:,.0f}")
-    sales_summary["Total Loans"] = sales_df["Total #"].apply(lambda x: f"{x:,}")
-    st.dataframe(sales_summary.T, use_container_width=True)
+    # Sales summary table (transposed — build as dict to avoid None)
+    table_data = {}
+    for i, m in enumerate(months_list):
+        col = {}
+        for tenor in TENORS:
+            col[f"{tenor}mo Disbursement (₦)"] = f"{sales_df.iloc[i][f'{tenor}mo ₦']:,.0f}"
+            col[f"{tenor}mo Loans"] = f"{sales_df.iloc[i][f'{tenor}mo #']:,}"
+        col["Total Disbursement (₦)"] = f"{sales_df.iloc[i]['Total ₦']:,.0f}"
+        col["Total Loans"] = f"{sales_df.iloc[i]['Total #']:,}"
+        table_data[m] = col
+    st.dataframe(pd.DataFrame(table_data), use_container_width=True)
 
 
 # ======================== TAB 3: Risk Dashboard ========================
