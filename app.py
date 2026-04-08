@@ -490,17 +490,26 @@ with tab2:
     )
     st.plotly_chart(fig_disb, use_container_width=True)
 
-    # Loan count chart
+    # Loan count chart — include starting book counts at month 0
+    # Compute starting book loan counts from balance / avg ticket
+    starting_loan_counts = {}
+    for sc in starting_cohorts:
+        t = sc["tenor"]
+        starting_loan_counts[t] = int(sc["balance"] / avg_ticket[t]) if avg_ticket[t] > 0 else 0
+
+    all_months_loans = [date_labels[0]] + months_list
     fig_loans = go.Figure()
     for tenor in TENORS:
+        starting_count = starting_loan_counts.get(tenor, 0)
+        new_counts = list(sales_df[f"{tenor}mo #"].values)
         fig_loans.add_trace(go.Bar(
-            x=months_list,
-            y=sales_df[f"{tenor}mo #"],
+            x=all_months_loans,
+            y=[starting_count] + new_counts,
             name=f"{tenor}mo",
             marker_color=colors_map.get(f"{tenor}mo", "#95a5a6"),
         ))
     fig_loans.update_layout(
-        title="Monthly Loan Count by Tenor",
+        title="Monthly Loan Count by Tenor (incl. Starting Book)",
         barmode="stack",
         yaxis_title="Loans",
         height=400, hovermode="x unified",
@@ -547,13 +556,13 @@ with tab2:
     )
     st.plotly_chart(fig_yield, use_container_width=True)
 
-    # Sales summary table (transposed)
+    # Sales summary table (transposed, all strings to avoid None)
     sales_summary = pd.DataFrame(index=months_list)
     for tenor in TENORS:
-        sales_summary[f"{tenor}mo Disbursement"] = sales_df[f"{tenor}mo ₦"].apply(lambda x: f"₦{x:,.0f}")
-        sales_summary[f"{tenor}mo Loans"] = sales_df[f"{tenor}mo #"].values
-    sales_summary["Total Disbursement"] = sales_df["Total ₦"].apply(lambda x: f"₦{x:,.0f}")
-    sales_summary["Total Loans"] = sales_df["Total #"].values
+        sales_summary[f"{tenor}mo Disbursement (₦)"] = sales_df[f"{tenor}mo ₦"].apply(lambda x: f"{x:,.0f}")
+        sales_summary[f"{tenor}mo Loans"] = sales_df[f"{tenor}mo #"].apply(lambda x: f"{x:,}")
+    sales_summary["Total Disbursement (₦)"] = sales_df["Total ₦"].apply(lambda x: f"{x:,.0f}")
+    sales_summary["Total Loans"] = sales_df["Total #"].apply(lambda x: f"{x:,}")
     st.dataframe(sales_summary.T, use_container_width=True)
 
 
