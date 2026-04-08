@@ -238,10 +238,18 @@ rate_12 = st.sidebar.number_input("12mo rate (%)", 0.0, 20.0, 5.0, 0.25)
 tenor_rates = {6: rate_6, 9: rate_9, 12: rate_12}
 
 st.sidebar.subheader("Average Loan Size (₦)")
-avg_loan_6 = st.sidebar.number_input("6mo avg ticket (₦)", 100_000, 50_000_000, 3_000_000, 500_000, format="%d")
-avg_loan_9 = st.sidebar.number_input("9mo avg ticket (₦)", 100_000, 50_000_000, 5_000_000, 500_000, format="%d")
-avg_loan_12 = st.sidebar.number_input("12mo avg ticket (₦)", 100_000, 50_000_000, 7_000_000, 500_000, format="%d")
-avg_ticket = {6: avg_loan_6, 9: avg_loan_9, 12: avg_loan_12}
+avg_loan_6_str = st.sidebar.text_input("6mo avg ticket (₦)", value="3,247,943")
+avg_loan_9_str = st.sidebar.text_input("9mo avg ticket (₦)", value="5,891,139")
+avg_loan_12_str = st.sidebar.text_input("12mo avg ticket (₦)", value="6,135,069")
+try:
+    avg_ticket = {
+        6: int(avg_loan_6_str.replace(",", "")),
+        9: int(avg_loan_9_str.replace(",", "")),
+        12: int(avg_loan_12_str.replace(",", "")),
+    }
+except ValueError:
+    avg_ticket = {6: 3_247_943, 9: 5_891_139, 12: 6_135_069}
+    st.sidebar.error("Enter valid numbers")
 
 # ---------------------------------------------------------------------------
 # Starting Book
