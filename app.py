@@ -987,17 +987,10 @@ with tab4:
             marker=dict(size=8, symbol="diamond"),
             yaxis="y2",
         ))
-    # Vertical line at handoff
-    handoff_idx = len(hist_actuals) - 0.5  # between Apr 2026 and May 2026
-    fig_cashflow.add_vline(
-        x=handoff_idx,
-        line=dict(color="gray", dash="dash", width=2),
-        annotation_text="Projection starts",
-        annotation_position="top",
-    )
     fig_cashflow.update_layout(
         title="SME Loan Book — Historical Actuals & Forward Projection",
         barmode="relative",
+        xaxis=dict(type="category"),
         yaxis=dict(title="Monthly Flows (₦)", tickformat=",.0f"),
         yaxis2=dict(title="Outstanding Balance (₦)", overlaying="y",
                     side="right", tickformat=",.0f"),
