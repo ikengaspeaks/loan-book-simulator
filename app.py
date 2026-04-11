@@ -210,7 +210,11 @@ annual_default = st.sidebar.number_input(
 st.sidebar.divider()
 st.sidebar.header("New Loan Disbursements")
 
-base_disb_str = st.sidebar.text_input("Base Monthly Disbursement (₦)", value="500,000,000")
+base_disb_str = st.sidebar.text_input(
+    "Base Monthly Disbursement (₦)",
+    value="762,900,000",
+    help="Default anchors projection to Mar 2026 actual disbursement",
+)
 try:
     base_disbursement = int(base_disb_str.replace(",", ""))
 except ValueError:
