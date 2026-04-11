@@ -827,8 +827,15 @@ with tab4:
     HANDOFF_MONTH = "2026-03"
     hist_actuals = hist_df[hist_df["month"] <= HANDOFF_MONTH].copy()
 
-    # Last QB actual value — the projection anchors here
+    # Last QB actual value (includes accrued interest)
     last_qb_value = float(hist_actuals["qb_balance"].iloc[-1])
+
+    # Load exact runoff schedule computed from 979 real active loans at Mar 2026
+    runoff_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "starting_book_runoff.csv")
+    runoff_df = pd.read_csv(runoff_path)
+    # Principal-only handoff balance (from actual loans)
+    principal_handoff = float(runoff_df["balance_end_month"].iloc[0]) + float(runoff_df["collections"].iloc[0])
 
     # Build combined timeline
     combined_rows = []
@@ -868,19 +875,22 @@ with tab4:
             amt = base_disbursement * tenor_mix[tenor] * (1 + tenor_growth[tenor]) ** i
             proj_disb_by_tenor[tenor].append(amt)
 
-    # Starting book runoff — exponential decay with half-life = weighted avg life
-    # This gives a smooth tail that avoids the "cliff" from linear bucket amortization
-    # Half-life of 6 months means ~50% of book is collected in first 6 months, then tail
-    HALF_LIFE = 6
-    monthly_retention = 0.5 ** (1 / HALF_LIFE)  # ~0.891 for 6mo half-life
+    # Starting book runoff — use EXACT schedule from 979 real loans at Mar 2026
+    # Scale to match QB anchor (principal runoff is ~N2.42B, QB is ~N3.33B — the gap
+    # is accrued interest which is real value but not principal outstanding)
+    runoff_balance_by_month = dict(zip(runoff_df["month"], runoff_df["balance_end_month"]))
+    runoff_collections_by_month = dict(zip(runoff_df["month"], runoff_df["collections"]))
+    runoff_interest_by_month = dict(zip(runoff_df["month"], runoff_df["interest_income"]))
+
+    scale = last_qb_value / principal_handoff if principal_handoff > 0 else 1.0
+
     starting_balance_schedule = [0.0] * horizon
     starting_collections = [0.0] * horizon
-    running_balance = last_qb_value
-    for i in range(horizon):
-        new_balance = running_balance * monthly_retention
-        starting_collections[i] = running_balance - new_balance
-        starting_balance_schedule[i] = new_balance
-        running_balance = new_balance
+    starting_interest = [0.0] * horizon
+    for i, mk in enumerate(proj_month_keys):
+        starting_balance_schedule[i] = float(runoff_balance_by_month.get(mk, 0)) * scale
+        starting_collections[i] = float(runoff_collections_by_month.get(mk, 0)) * scale
+        starting_interest[i] = float(runoff_interest_by_month.get(mk, 0)) * scale
 
     # Simulate new cohorts — each month's disbursements become cohorts that amortize
     all_proj_months = horizon + 24
@@ -909,7 +919,7 @@ with tab4:
         new_disb = sum(proj_disb_by_tenor[t][i] for t in TENORS)
         closing = starting_balance_schedule[i] + new_cohort_balance[i]
         total_repay = starting_collections[i] + new_cohort_collected[i]
-        total_int = new_cohort_interest[i]  # starting book interest is already in QB value
+        total_int = starting_interest[i] + new_cohort_interest[i]
         combined_rows.append({
             "month": mk,
             "opening": prev_closing,
