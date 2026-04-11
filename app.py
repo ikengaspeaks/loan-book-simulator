@@ -819,42 +819,71 @@ with tab4:
         st.error(f"Historical data not found at {hist_path}")
         st.stop()
 
-    # Handoff month — last month with actual disbursements
-    HANDOFF_MONTH = "2026-04"
+    # Handoff at the last month with a reliable QB actual (Mar 2026 — Apr is stale)
+    HANDOFF_MONTH = "2026-03"
     hist_actuals = hist_df[hist_df["month"] <= HANDOFF_MONTH].copy()
-    hist_runoff = hist_df[hist_df["month"] > HANDOFF_MONTH].copy()
 
-    # Build projection months (forward from May 2026)
-    proj_start_date = datetime(2026, 5, 1)
-    proj_months = []
+    # Last QB actual value — the projection anchors here
+    last_qb_value = float(hist_actuals["qb_balance"].iloc[-1])
+
+    # Build combined timeline
+    combined_rows = []
+    prev_closing = 0
+    for _, row in hist_actuals.iterrows():
+        disb = float(row["disbursements"])
+        repay = float(row["principal_collected"])
+        qb_val = row["qb_balance"]
+        qb_actual = float(qb_val) if pd.notna(qb_val) and str(qb_val).strip() != "" else None
+        # Use QB as closing where available, model as fallback
+        closing = qb_actual if qb_actual is not None else float(row["model_balance"])
+        combined_rows.append({
+            "month": row["month"],
+            "opening": prev_closing,
+            "disbursements": disb,
+            "repayments": repay,
+            "closing": closing,
+            "interest": float(row["interest_income"]),
+            "qb_actual": qb_actual,
+            "source": "Historical",
+        })
+        prev_closing = closing
+
+    # Projection months start the month after the handoff
+    proj_start_date = datetime(2026, 4, 1)
     proj_month_keys = []
     for i in range(horizon):
         d = proj_start_date + relativedelta(months=i)
-        proj_months.append(d.strftime("%b %Y"))
         proj_month_keys.append(d.strftime("%Y-%m"))
 
-    # For each projection month, compute new disbursements by tenor
-    # using the same levers as the main simulator
-    # base_disbursement, tenor_mix, tenor_growth, tenor_rates defined in sidebar above
+    # Run a sidebar-driven simulation for the projection
+    # Anchor: starting book balance = last_qb_value, assume blended runoff over 6mo
+    # New disbursements from the sidebar levers
     proj_disb_by_tenor = {t: [] for t in TENORS}
-    proj_total_disb = []
     for i in range(horizon):
-        total = 0
         for tenor in TENORS:
             amt = base_disbursement * tenor_mix[tenor] * (1 + tenor_growth[tenor]) ** i
             proj_disb_by_tenor[tenor].append(amt)
-            total += amt
-        proj_total_disb.append(total)
 
-    # Simulate projected cohorts
-    # Each month's disbursement becomes a cohort that amortizes over its tenor
-    # Track: balance contribution, principal collected, interest income per month
-    all_proj_months = horizon + 24  # extra runway to let cohorts fully mature
-    proj_balance = [0.0] * all_proj_months
-    proj_collected = [0.0] * all_proj_months
-    proj_interest = [0.0] * all_proj_months
+    # Starting book runoff: amortize last_qb_value linearly over ~5 months
+    # (matches the ~5mo weighted avg remaining life from our BQ analysis)
+    STARTING_LIFE = 5
+    starting_balance_schedule = []
+    for i in range(horizon):
+        remaining = max(0, (STARTING_LIFE - i - 1) / STARTING_LIFE)
+        starting_balance_schedule.append(last_qb_value * remaining)
 
-    for i in range(horizon):  # origination month index
+    starting_collections = []
+    per_month_collection = last_qb_value / STARTING_LIFE
+    for i in range(horizon):
+        starting_collections.append(per_month_collection if i < STARTING_LIFE else 0)
+
+    # Simulate new cohorts — each month's disbursements become cohorts that amortize
+    all_proj_months = horizon + 24
+    new_cohort_balance = [0.0] * all_proj_months
+    new_cohort_collected = [0.0] * all_proj_months
+    new_cohort_interest = [0.0] * all_proj_months
+
+    for i in range(horizon):
         for tenor in TENORS:
             principal = proj_disb_by_tenor[tenor][i]
             if principal <= 0:
@@ -865,63 +894,20 @@ with tab4:
                 sim_idx = i + m
                 if sim_idx >= all_proj_months:
                     break
-                # Outstanding balance at end of month m (after repayment)
                 remaining = principal * (tenor - m - 1) / tenor
-                proj_balance[sim_idx] += remaining
-                proj_collected[sim_idx] += monthly_principal
-                proj_interest[sim_idx] += principal * rate
+                new_cohort_balance[sim_idx] += remaining
+                new_cohort_collected[sim_idx] += monthly_principal
+                new_cohort_interest[sim_idx] += principal * rate
 
-    # Add existing book runoff contribution (from historical_book.csv's post-handoff rows)
-    runoff_balance_map = {}
-    runoff_collected_map = {}
-    runoff_interest_map = {}
-    for _, row in hist_runoff.iterrows():
-        runoff_balance_map[row["month"]] = float(row["model_balance"])
-        runoff_collected_map[row["month"]] = float(row["principal_collected"])
-        runoff_interest_map[row["month"]] = float(row["interest_income"])
-
-    # Build combined timeline
-    combined_rows = []
-    prev_closing = 0
-    for _, row in hist_actuals.iterrows():
-        opening = prev_closing
-        disb = float(row["disbursements"])
-        repay = float(row["principal_collected"])
-        closing = float(row["model_balance"])
-        # Parse QB balance (may be empty for months without data)
-        qb_val = row["qb_balance"]
-        qb_actual = float(qb_val) if pd.notna(qb_val) and str(qb_val).strip() != "" else None
-        combined_rows.append({
-            "month": row["month"],
-            "opening": opening,
-            "disbursements": disb,
-            "repayments": repay,
-            "closing": closing,
-            "interest": float(row["interest_income"]),
-            "qb_actual": qb_actual,
-            "source": "Historical",
-        })
-        prev_closing = closing
-
-    # Projected months: combine existing runoff + new cohorts
+    # Build projected rows
     for i, mk in enumerate(proj_month_keys):
-        new_disb = proj_total_disb[i]
-        # Existing book contribution this month
-        existing_bal = runoff_balance_map.get(mk, 0)
-        existing_repay = runoff_collected_map.get(mk, 0)
-        existing_int = runoff_interest_map.get(mk, 0)
-        # New cohorts contribution (from projection sim)
-        new_bal = proj_balance[i]
-        new_repay = proj_collected[i]
-        new_int = proj_interest[i]
-        # Total closing = existing runoff + new cohorts
-        closing = existing_bal + new_bal
-        total_repay = existing_repay + new_repay
-        total_int = existing_int + new_int
-        opening = prev_closing
+        new_disb = sum(proj_disb_by_tenor[t][i] for t in TENORS)
+        closing = starting_balance_schedule[i] + new_cohort_balance[i]
+        total_repay = starting_collections[i] + new_cohort_collected[i]
+        total_int = new_cohort_interest[i]  # starting book interest is already in QB value
         combined_rows.append({
             "month": mk,
-            "opening": opening,
+            "opening": prev_closing,
             "disbursements": new_disb,
             "repayments": total_repay,
             "closing": closing,
@@ -1000,14 +986,14 @@ with tab4:
     st.plotly_chart(fig_cashflow, use_container_width=True)
 
     # ----- Key metrics at handoff and end -----
-    handoff_closing = combined_df[combined_df["month"] == HANDOFF_MONTH]["closing"].values[0]
+    handoff_closing = last_qb_value
     final_closing = combined_df["closing"].iloc[-1]
     peak_bal = combined_df["closing"].max()
     total_proj_disb = combined_df[proj_mask]["disbursements"].sum()
 
     km1, km2, km3, km4 = st.columns(4)
     with km1:
-        st.metric("Handoff Balance (Apr 2026)", f"₦{handoff_closing / 1e9:.2f}B")
+        st.metric("Handoff Balance (Mar 2026 QB)", f"₦{handoff_closing / 1e9:.2f}B")
     with km2:
         st.metric("Peak Balance", f"₦{peak_bal / 1e9:.2f}B")
     with km3:
