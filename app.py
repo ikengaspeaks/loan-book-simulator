@@ -868,24 +868,19 @@ with tab4:
             amt = base_disbursement * tenor_mix[tenor] * (1 + tenor_growth[tenor]) ** i
             proj_disb_by_tenor[tenor].append(amt)
 
-    # Starting book runoff — use realistic tenor mix from BQ analysis:
-    # 58% 6mo (avg 3mo remaining), 17% 9mo (avg 6mo remaining), 24% 12mo (avg 10mo remaining)
-    starting_buckets = [
-        {"share": 0.58, "remaining_life": 3},   # 6mo bucket
-        {"share": 0.17, "remaining_life": 6},   # 9mo bucket
-        {"share": 0.24, "remaining_life": 10},  # 12mo bucket
-    ]
+    # Starting book runoff — exponential decay with half-life = weighted avg life
+    # This gives a smooth tail that avoids the "cliff" from linear bucket amortization
+    # Half-life of 6 months means ~50% of book is collected in first 6 months, then tail
+    HALF_LIFE = 6
+    monthly_retention = 0.5 ** (1 / HALF_LIFE)  # ~0.891 for 6mo half-life
     starting_balance_schedule = [0.0] * horizon
     starting_collections = [0.0] * horizon
-    for bucket in starting_buckets:
-        bucket_bal = last_qb_value * bucket["share"]
-        life = bucket["remaining_life"]
-        per_month = bucket_bal / life
-        for i in range(horizon):
-            remaining = max(0, (life - i - 1) / life)
-            starting_balance_schedule[i] += bucket_bal * remaining
-            if i < life:
-                starting_collections[i] += per_month
+    running_balance = last_qb_value
+    for i in range(horizon):
+        new_balance = running_balance * monthly_retention
+        starting_collections[i] = running_balance - new_balance
+        starting_balance_schedule[i] = new_balance
+        running_balance = new_balance
 
     # Simulate new cohorts — each month's disbursements become cohorts that amortize
     all_proj_months = horizon + 24
