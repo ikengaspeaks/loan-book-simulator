@@ -347,7 +347,12 @@ summary_df["date"] = date_labels
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab1, tab2, tab3 = st.tabs(["📊 Portfolio Projection", "💰 Sales Planning", "⚠️ Risk Dashboard"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Portfolio Projection",
+    "💰 Sales Planning",
+    "⚠️ Risk Dashboard",
+    "📈 Cashflow Model (Historical + Projected)",
+])
 
 # ======================== TAB 1: Portfolio Projection ========================
 with tab1:
@@ -795,3 +800,220 @@ with tab3:
         height=400, hovermode="x unified",
     )
     st.plotly_chart(fig_def_compare, use_container_width=True)
+
+
+# ======================== TAB 4: Cashflow Model ========================
+with tab4:
+    st.subheader("Historical Actuals + Forward Projection")
+    st.caption(
+        "Historical data is built from every SME loan disbursed since Nov 2024 "
+        "(assuming perfect straight-line repayment). Projected months use the sidebar levers."
+    )
+
+    # Load historical data
+    import os
+    hist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "historical_book.csv")
+    try:
+        hist_df = pd.read_csv(hist_path)
+    except FileNotFoundError:
+        st.error(f"Historical data not found at {hist_path}")
+        st.stop()
+
+    # Handoff month — last month with actual disbursements
+    HANDOFF_MONTH = "2026-04"
+    hist_actuals = hist_df[hist_df["month"] <= HANDOFF_MONTH].copy()
+    hist_runoff = hist_df[hist_df["month"] > HANDOFF_MONTH].copy()
+
+    # Build projection months (forward from May 2026)
+    proj_start_date = datetime(2026, 5, 1)
+    proj_months = []
+    proj_month_keys = []
+    for i in range(horizon):
+        d = proj_start_date + relativedelta(months=i)
+        proj_months.append(d.strftime("%b %Y"))
+        proj_month_keys.append(d.strftime("%Y-%m"))
+
+    # For each projection month, compute new disbursements by tenor
+    # using the same levers as the main simulator
+    # base_disbursement, tenor_mix, tenor_growth, tenor_rates defined in sidebar above
+    proj_disb_by_tenor = {t: [] for t in TENORS}
+    proj_total_disb = []
+    for i in range(horizon):
+        total = 0
+        for tenor in TENORS:
+            amt = base_disbursement * tenor_mix[tenor] * (1 + tenor_growth[tenor]) ** i
+            proj_disb_by_tenor[tenor].append(amt)
+            total += amt
+        proj_total_disb.append(total)
+
+    # Simulate projected cohorts
+    # Each month's disbursement becomes a cohort that amortizes over its tenor
+    # Track: balance contribution, principal collected, interest income per month
+    all_proj_months = horizon + 24  # extra runway to let cohorts fully mature
+    proj_balance = [0.0] * all_proj_months
+    proj_collected = [0.0] * all_proj_months
+    proj_interest = [0.0] * all_proj_months
+
+    for i in range(horizon):  # origination month index
+        for tenor in TENORS:
+            principal = proj_disb_by_tenor[tenor][i]
+            if principal <= 0:
+                continue
+            rate = tenor_rates[tenor] / 100
+            monthly_principal = principal / tenor
+            for m in range(tenor):
+                sim_idx = i + m
+                if sim_idx >= all_proj_months:
+                    break
+                # Outstanding balance at end of month m (after repayment)
+                remaining = principal * (tenor - m - 1) / tenor
+                proj_balance[sim_idx] += remaining
+                proj_collected[sim_idx] += monthly_principal
+                proj_interest[sim_idx] += principal * rate
+
+    # Add existing book runoff contribution (from historical_book.csv's post-handoff rows)
+    # These are the months where existing loans continue to pay down with no new disbursements
+    runoff_balance_map = {}
+    runoff_collected_map = {}
+    runoff_interest_map = {}
+    for _, row in hist_runoff.iterrows():
+        runoff_balance_map[row["month"]] = float(row["outstanding_balance"])
+        runoff_collected_map[row["month"]] = float(row["principal_collected"])
+        runoff_interest_map[row["month"]] = float(row["interest_income"])
+
+    # Build combined timeline
+    combined_rows = []
+    # Historical actuals (with their original balance)
+    prev_closing = 0
+    for _, row in hist_actuals.iterrows():
+        opening = prev_closing
+        disb = float(row["disbursements"])
+        repay = float(row["principal_collected"])
+        closing = float(row["outstanding_balance"])
+        combined_rows.append({
+            "month": row["month"],
+            "opening": opening,
+            "disbursements": disb,
+            "repayments": repay,
+            "closing": closing,
+            "interest": float(row["interest_income"]),
+            "source": "Historical",
+        })
+        prev_closing = closing
+
+    # Projected months: combine existing runoff + new cohorts
+    for i, mk in enumerate(proj_month_keys):
+        new_disb = proj_total_disb[i]
+        # Existing book contribution this month
+        existing_bal = runoff_balance_map.get(mk, 0)
+        existing_repay = runoff_collected_map.get(mk, 0)
+        existing_int = runoff_interest_map.get(mk, 0)
+        # New cohorts contribution (from projection sim)
+        new_bal = proj_balance[i]
+        new_repay = proj_collected[i]
+        new_int = proj_interest[i]
+        # Total closing = existing runoff + new cohorts
+        closing = existing_bal + new_bal
+        total_repay = existing_repay + new_repay
+        total_int = existing_int + new_int
+        opening = prev_closing
+        combined_rows.append({
+            "month": mk,
+            "opening": opening,
+            "disbursements": new_disb,
+            "repayments": total_repay,
+            "closing": closing,
+            "interest": total_int,
+            "source": "Projected",
+        })
+        prev_closing = closing
+
+    combined_df = pd.DataFrame(combined_rows)
+
+    # ----- Chart: combo with historical/projected distinction -----
+    hist_mask = combined_df["source"] == "Historical"
+    proj_mask = combined_df["source"] == "Projected"
+
+    fig_cashflow = go.Figure()
+    # Historical disbursements
+    fig_cashflow.add_trace(go.Bar(
+        x=combined_df[hist_mask]["month"],
+        y=combined_df[hist_mask]["disbursements"],
+        name="Historical Disbursements",
+        marker_color="#2980b9",
+    ))
+    # Projected disbursements (lighter blue)
+    fig_cashflow.add_trace(go.Bar(
+        x=combined_df[proj_mask]["month"],
+        y=combined_df[proj_mask]["disbursements"],
+        name="Projected Disbursements",
+        marker_color="#85c1e9",
+    ))
+    # Historical repayments
+    fig_cashflow.add_trace(go.Bar(
+        x=combined_df[hist_mask]["month"],
+        y=-combined_df[hist_mask]["repayments"],  # negative for visual
+        name="Historical Repayments",
+        marker_color="#c0392b",
+    ))
+    # Projected repayments
+    fig_cashflow.add_trace(go.Bar(
+        x=combined_df[proj_mask]["month"],
+        y=-combined_df[proj_mask]["repayments"],
+        name="Projected Repayments",
+        marker_color="#f1948a",
+    ))
+    # Closing balance line (right axis)
+    fig_cashflow.add_trace(go.Scatter(
+        x=combined_df["month"],
+        y=combined_df["closing"],
+        name="Closing Balance",
+        mode="lines+markers",
+        line=dict(width=3, color="#27ae60"),
+        yaxis="y2",
+    ))
+    # Vertical line at handoff
+    handoff_idx = len(hist_actuals) - 0.5  # between Apr 2026 and May 2026
+    fig_cashflow.add_vline(
+        x=handoff_idx,
+        line=dict(color="gray", dash="dash", width=2),
+        annotation_text="Projection starts",
+        annotation_position="top",
+    )
+    fig_cashflow.update_layout(
+        title="SME Loan Book — Historical Actuals & Forward Projection",
+        barmode="relative",
+        yaxis=dict(title="Monthly Flows (₦)", tickformat=",.0f"),
+        yaxis2=dict(title="Outstanding Balance (₦)", overlaying="y",
+                    side="right", tickformat=",.0f"),
+        height=550, hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_cashflow, use_container_width=True)
+
+    # ----- Key metrics at handoff and end -----
+    handoff_closing = combined_df[combined_df["month"] == HANDOFF_MONTH]["closing"].values[0]
+    final_closing = combined_df["closing"].iloc[-1]
+    peak_bal = combined_df["closing"].max()
+    total_proj_disb = combined_df[proj_mask]["disbursements"].sum()
+
+    km1, km2, km3, km4 = st.columns(4)
+    with km1:
+        st.metric("Handoff Balance (Apr 2026)", f"₦{handoff_closing / 1e9:.2f}B")
+    with km2:
+        st.metric("Peak Balance", f"₦{peak_bal / 1e9:.2f}B")
+    with km3:
+        st.metric("Ending Balance", f"₦{final_closing / 1e9:.2f}B")
+    with km4:
+        st.metric("Total Projected Disbursements", f"₦{total_proj_disb / 1e9:.2f}B")
+
+    # ----- Cashflow table -----
+    st.subheader("Monthly Cashflow Table")
+
+    display = combined_df.copy()
+    for c in ["opening", "disbursements", "repayments", "closing", "interest"]:
+        display[c] = display[c].apply(lambda x: f"₦{x:,.0f}")
+    display.columns = ["Month", "Opening Balance", "New Disbursements",
+                       "Principal Repayments", "Closing Balance",
+                       "Interest Income", "Source"]
+    st.dataframe(display, use_container_width=True, hide_index=True)
