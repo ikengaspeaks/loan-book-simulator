@@ -872,24 +872,25 @@ with tab4:
                 proj_interest[sim_idx] += principal * rate
 
     # Add existing book runoff contribution (from historical_book.csv's post-handoff rows)
-    # These are the months where existing loans continue to pay down with no new disbursements
     runoff_balance_map = {}
     runoff_collected_map = {}
     runoff_interest_map = {}
     for _, row in hist_runoff.iterrows():
-        runoff_balance_map[row["month"]] = float(row["outstanding_balance"])
+        runoff_balance_map[row["month"]] = float(row["model_balance"])
         runoff_collected_map[row["month"]] = float(row["principal_collected"])
         runoff_interest_map[row["month"]] = float(row["interest_income"])
 
     # Build combined timeline
     combined_rows = []
-    # Historical actuals (with their original balance)
     prev_closing = 0
     for _, row in hist_actuals.iterrows():
         opening = prev_closing
         disb = float(row["disbursements"])
         repay = float(row["principal_collected"])
-        closing = float(row["outstanding_balance"])
+        closing = float(row["model_balance"])
+        # Parse QB balance (may be empty for months without data)
+        qb_val = row["qb_balance"]
+        qb_actual = float(qb_val) if pd.notna(qb_val) and str(qb_val).strip() != "" else None
         combined_rows.append({
             "month": row["month"],
             "opening": opening,
@@ -897,6 +898,7 @@ with tab4:
             "repayments": repay,
             "closing": closing,
             "interest": float(row["interest_income"]),
+            "qb_actual": qb_actual,
             "source": "Historical",
         })
         prev_closing = closing
@@ -924,6 +926,7 @@ with tab4:
             "repayments": total_repay,
             "closing": closing,
             "interest": total_int,
+            "qb_actual": None,
             "source": "Projected",
         })
         prev_closing = closing
@@ -963,15 +966,27 @@ with tab4:
         name="Projected Repayments",
         marker_color="#f1948a",
     ))
-    # Closing balance line (right axis)
+    # Model closing balance line (right axis)
     fig_cashflow.add_trace(go.Scatter(
         x=combined_df["month"],
         y=combined_df["closing"],
-        name="Closing Balance",
+        name="Model Closing Balance",
         mode="lines+markers",
         line=dict(width=3, color="#27ae60"),
         yaxis="y2",
     ))
+    # QB actuals line (right axis) — only where we have data
+    qb_df = combined_df[combined_df["qb_actual"].notna()]
+    if len(qb_df) > 0:
+        fig_cashflow.add_trace(go.Scatter(
+            x=qb_df["month"],
+            y=qb_df["qb_actual"],
+            name="QuickBooks Actual",
+            mode="lines+markers",
+            line=dict(width=3, color="#8e44ad", dash="dot"),
+            marker=dict(size=8, symbol="diamond"),
+            yaxis="y2",
+        ))
     # Vertical line at handoff
     handoff_idx = len(hist_actuals) - 0.5  # between Apr 2026 and May 2026
     fig_cashflow.add_vline(
@@ -1013,7 +1028,10 @@ with tab4:
     display = combined_df.copy()
     for c in ["opening", "disbursements", "repayments", "closing", "interest"]:
         display[c] = display[c].apply(lambda x: f"₦{x:,.0f}")
+    display["qb_actual"] = display["qb_actual"].apply(
+        lambda x: f"₦{x:,.0f}" if pd.notna(x) else "—"
+    )
     display.columns = ["Month", "Opening Balance", "New Disbursements",
-                       "Principal Repayments", "Closing Balance",
-                       "Interest Income", "Source"]
+                       "Principal Repayments", "Model Closing", "Interest Income",
+                       "QuickBooks Actual", "Source"]
     st.dataframe(display, use_container_width=True, hide_index=True)
